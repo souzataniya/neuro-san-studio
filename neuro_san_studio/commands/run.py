@@ -62,7 +62,7 @@ class NeuroSanRunner:
         self.logs_dir = self.root_dir / "logs"
         self.thinking_file = self.logs_dir / "agent_thinking.txt"
         self.thinking_dir = self.logs_dir / "thinking_dir"
-        print(f"Root directory: {self.root_dir}")
+        self._logger.info("Root directory: %s", self.root_dir)
         # Shared project-resource resolution (manifest, tool path, mcp, toolbox),
         # also used by `ns chat` so the two commands resolve a project identically.
         # The project .env file is loaded once, globally, by the CLI's top-level
@@ -147,19 +147,19 @@ class NeuroSanRunner:
         toolbox_file = self.args["agent_toolbox_info_file"]
         if toolbox_file:
             os.environ["AGENT_TOOLBOX_INFO_FILE"] = toolbox_file
-            print(f"AGENT_TOOLBOX_INFO_FILE set to: {toolbox_file}")
+            self._logger.info("AGENT_TOOLBOX_INFO_FILE set to: %s", toolbox_file)
         else:
-            print("AGENT_TOOLBOX_INFO_FILE: (not set — using built-in default toolbox)")
+            self._logger.info("AGENT_TOOLBOX_INFO_FILE: (not set — using built-in default toolbox)")
 
         designer_toolbox_file = self.args["agent_network_designer_toolbox_info_file"]
         if designer_toolbox_file:
             os.environ["AGENT_NETWORK_DESIGNER_TOOLBOX_INFO_FILE"] = designer_toolbox_file
-            print(f"AGENT_NETWORK_DESIGNER_TOOLBOX_INFO_FILE set to: {designer_toolbox_file}")
+            self._logger.info("AGENT_NETWORK_DESIGNER_TOOLBOX_INFO_FILE set to: %s", designer_toolbox_file)
 
     def set_environment_variables(self):
         """Set required environment variables, optionally using neuro-san defaults."""
-        print("\n" + "=" * 50 + "\n")
-        print("Setting environment variables...\n")
+        self._logger.info("\n" + "=" * 50 + "\n")
+        self._logger.info("Setting environment variables...\n")
         # Common env variables
         self.project_env.set_pythonpath()
         os.environ["AGENT_MANIFEST_FILE"] = self.args["agent_manifest_file"]
@@ -170,45 +170,45 @@ class NeuroSanRunner:
         os.environ["AGENT_MANIFEST_UPDATE_PERIOD_SECONDS"] = str(self.args["manifest_update_period_seconds"])
         os.environ["AGENT_MANIFEST_CONCURRENCY_CONTEXT"] = str(self.args["manifest_concurrency_context"])
         os.environ["LOG_LEVEL"] = self.args["log_level"]
-        print(f"PYTHONPATH set to: {os.environ['PYTHONPATH']}")
-        print(f"AGENT_MANIFEST_FILE set to: {os.environ['AGENT_MANIFEST_FILE']}")
-        print(f"AGENT_TOOL_PATH set to: {os.environ['AGENT_TOOL_PATH']}")
-        print(f"MCP_SERVERS_INFO_FILE set to: {os.environ['MCP_SERVERS_INFO_FILE']}")
-        print(f"NEURO_SAN_SERVER_CONNECTION set to: {os.environ['NEURO_SAN_SERVER_CONNECTION']}")
-        print(f"AGENT_MANIFEST_UPDATE_PERIOD_SECONDS set to: {os.environ['AGENT_MANIFEST_UPDATE_PERIOD_SECONDS']}")
-        print(f"AGENT_MANIFEST_CONCURRENCY_CONTEXT set to: {os.environ['AGENT_MANIFEST_CONCURRENCY_CONTEXT']}")
-        print(f"LOG_LEVEL set to: {os.environ['LOG_LEVEL']}\n")
+        self._logger.info("PYTHONPATH set to: %s", os.environ["PYTHONPATH"])
+        self._logger.info("AGENT_MANIFEST_FILE set to: %s", os.environ["AGENT_MANIFEST_FILE"])
+        self._logger.info("AGENT_TOOL_PATH set to: %s", os.environ["AGENT_TOOL_PATH"])
+        self._logger.info("MCP_SERVERS_INFO_FILE set to: %s", os.environ["MCP_SERVERS_INFO_FILE"])
+        self._logger.info("NEURO_SAN_SERVER_CONNECTION set to: %s", os.environ["NEURO_SAN_SERVER_CONNECTION"])
+        self._logger.info("AGENT_MANIFEST_UPDATE_PERIOD_SECONDS set to: %s", os.environ["AGENT_MANIFEST_UPDATE_PERIOD_SECONDS"])
+        self._logger.info("AGENT_MANIFEST_CONCURRENCY_CONTEXT set to: %s", os.environ["AGENT_MANIFEST_CONCURRENCY_CONTEXT"])
+        self._logger.info("LOG_LEVEL set to: %s\n", os.environ["LOG_LEVEL"])
 
         # Client-only env variables
         if not self.args["server_only"]:
             os.environ["THINKING_FILE"] = self.args["thinking_file"]
             os.environ["THINKING_DIR"] = self.args["thinking_dir"]
-            print(f"THINKING_FILE set to: {os.environ['THINKING_FILE']}")
-            print(f"THINKING_DIR set to: {os.environ['THINKING_DIR']}")
+            self._logger.info("THINKING_FILE set to: %s", os.environ["THINKING_FILE"])
+            self._logger.info("THINKING_DIR set to: %s", os.environ["THINKING_DIR"])
             os.environ["NSFLOW_HOST"] = str(self.args["nsflow_host"])
             os.environ["NSFLOW_PORT"] = str(self.args["nsflow_port"])
             os.environ["NSFLOW_PLUGIN_CRUSE"] = str(self.args["nsflow_plugin_cruse"])
             os.environ["VITE_API_PROTOCOL"] = str(self.args["vite_api_protocol"])
             os.environ["VITE_WS_PROTOCOL"] = str(self.args["vite_ws_protocol"])
-            print(f"NSFLOW_HOST set to: {os.environ['NSFLOW_HOST']}")
-            print(f"NSFLOW_PORT set to: {os.environ['NSFLOW_PORT']}")
-            print(f"NSFLOW_PLUGIN_CRUSE set to: {os.environ['NSFLOW_PLUGIN_CRUSE']}")
-            print(f"VITE_API_PROTOCOL set to: {os.environ['VITE_API_PROTOCOL']}")
-            print(f"VITE_WS_PROTOCOL set to: {os.environ['VITE_WS_PROTOCOL']}")
+            self._logger.info("NSFLOW_HOST set to: %s", os.environ["NSFLOW_HOST"])
+            self._logger.info("NSFLOW_PORT set to: %s", os.environ["NSFLOW_PORT"])
+            self._logger.info("NSFLOW_PLUGIN_CRUSE set to: %s", os.environ["NSFLOW_PLUGIN_CRUSE"])
+            self._logger.info("VITE_API_PROTOCOL set to: %s", os.environ["VITE_API_PROTOCOL"])
+            self._logger.info("VITE_WS_PROTOCOL set to: %s", os.environ["VITE_WS_PROTOCOL"])
             # Set env variable for using nsflow in client-only mode
             if self.args["client_only"]:
                 os.environ["NSFLOW_CLIENT_ONLY"] = "True"
-                print(f"NSFLOW_CLIENT_ONLY set to: {os.environ['NSFLOW_CLIENT_ONLY']}")
+                self._logger.info("NSFLOW_CLIENT_ONLY set to: %s", os.environ["NSFLOW_CLIENT_ONLY"])
 
         # Server-only env variables
         if not self.args["client_only"]:
             os.environ["NEURO_SAN_SERVER_HOST"] = self.args["server_host"]
             os.environ["NEURO_SAN_SERVER_HTTP_PORT"] = str(self.args["server_http_port"])
 
-            print(f"NEURO_SAN_SERVER_HOST set to: {os.environ['NEURO_SAN_SERVER_HOST']}")
-            print(f"NEURO_SAN_SERVER_HTTP_PORT set to: {os.environ['NEURO_SAN_SERVER_HTTP_PORT']}\n")
+            self._logger.info("NEURO_SAN_SERVER_HOST set to: %s", os.environ["NEURO_SAN_SERVER_HOST"])
+            self._logger.info("NEURO_SAN_SERVER_HTTP_PORT set to: %s\n", os.environ["NEURO_SAN_SERVER_HTTP_PORT"])
 
-        print("\n" + "=" * 50 + "\n")
+        self._logger.info("\n" + "=" * 50 + "\n")
 
     def start_process(self, command, process_name, log_file):
         """Start a subprocess and capture logs."""
@@ -235,7 +235,7 @@ class NeuroSanRunner:
                 start_new_session=True,
             )
 
-        print(f"Started {process_name} with PID {process.pid}")
+        self._logger.info("Started %s with PID %s", process_name, process.pid)
 
         for plugin in self.plugins:
             plugin.args["process_name"] = process_name
@@ -247,7 +247,7 @@ class NeuroSanRunner:
 
     def start_neuro_san(self):
         """Start the Neuro SAN server."""
-        print("Starting Neuro SAN server...")
+        self._logger.info("Starting Neuro SAN server...")
         command = [
             sys.executable,
             "-u",
@@ -257,11 +257,11 @@ class NeuroSanRunner:
             str(self.args["server_http_port"]),
         ]
         self.server_process = self.start_process(command, "NeuroSan", "logs/server.log")
-        print("NeuroSan server http started on port: ", self.args["server_http_port"])
+        self._logger.info("NeuroSan server http started on port: %s", self.args["server_http_port"])
 
     def start_nsflow(self):
         """Start nsflow client."""
-        print("Starting nsflow client...")
+        self._logger.info("Starting nsflow client...")
         command = [
             sys.executable,
             "-u",
@@ -276,15 +276,15 @@ class NeuroSanRunner:
         ]
 
         self.nsflow_process = self.start_process(command, "nsflow", "logs/nsflow.log")
-        print(f"nsflow client started on {self.args['nsflow_host']}:{self.args['nsflow_port']}")
+        self._logger.info("nsflow client started on %s:%s", self.args["nsflow_host"], self.args["nsflow_port"])
 
     # pylint: disable=unused-argument
     def signal_handler(self, signum, frame):
         """Handle termination signals to cleanly exit."""
-        print("\nTermination signal received. Stopping all processes...")
+        self._logger.info("\nTermination signal received. Stopping all processes...")
 
         if self.server_process:
-            print(f"\nStopping SERVER (PID {self.server_process.pid})...")
+            self._logger.info("\nStopping SERVER (PID %s)...", self.server_process.pid)
             if self.is_windows:
                 self.server_process.terminate()
             else:
@@ -293,7 +293,7 @@ class NeuroSanRunner:
             self.server_process.wait(timeout=10)
 
         if self.nsflow_process:
-            print(f"Stopping NSFLOW (PID {self.nsflow_process.pid})...")
+            self._logger.info("Stopping NSFLOW (PID %s)...", self.nsflow_process.pid)
             if self.is_windows:
                 self.nsflow_process.terminate()
             else:
@@ -339,7 +339,7 @@ class NeuroSanRunner:
     def _kill_processes_on_ports(self, ports: list[int]):
         """Kill processes using the specified ports."""
         for port in ports:
-            print(f"Attempting to kill process on port {port}...")
+            self._logger.info("Attempting to kill process on port %s...", port)
             try:
                 if self.is_windows:
                     # Windows: Find and kill process using netstat and taskkill
@@ -350,7 +350,7 @@ class NeuroSanRunner:
                         if f":{port}" in line and "LISTENING" in line:
                             pid = line.strip().split()[-1]
                             subprocess.run(["taskkill", "/F", "/PID", pid], check=True)
-                            print(f"  Killed process {pid} on port {port}")
+                            self._logger.info("  Killed process %s on port %s", pid, port)
                             break
                 else:
                     # Unix/Mac: Use lsof to find and kill process
@@ -359,13 +359,13 @@ class NeuroSanRunner:
                         pids = result.stdout.strip().split("\n")
                         for pid in pids:
                             subprocess.run(["kill", "-9", pid], check=True)
-                            print(f"  Killed process {pid} on port {port}")
+                            self._logger.info("  Killed process %s on port %s", pid, port)
                     else:
-                        print(f"  No process found on port {port}")
+                        self._logger.info("  No process found on port %s", port)
             except subprocess.CalledProcessError as e:
-                print(f"  Failed to kill process on port {port}: {e}")
+                self._logger.info("  Failed to kill process on port %s: %s", port, e)
             except Exception as e:  # pylint: disable=broad-exception-caught
-                print(f"  Error handling port {port}: {e}")
+                self._logger.info("  Error handling port %s: %s", port, e)
 
     def _validate_yes_no_input(self, prompt: str, max_attempts: int = 3) -> bool:
         """Prompt the user for a yes/no answer, validating against a whitelist.
@@ -384,10 +384,10 @@ class NeuroSanRunner:
                 # if there are remaining attempts or gives up otherwise with a 'no'.
                 raw = timedinput(prompt, timeout=INPUT_TIMEOUT_SECONDS, default="").strip().lower()
             except EOFError:
-                print("No input available. Considering the answer is 'no'.")
+                self._logger.info("No input available. Considering the answer is 'no'.")
                 return False
             except KeyboardInterrupt:
-                print("\nInput interrupted. Considering the answer is 'no'.")
+                self._logger.info("\nInput interrupted. Considering the answer is 'no'.")
                 return False
             if raw in valid_yes:
                 return True
@@ -395,8 +395,8 @@ class NeuroSanRunner:
                 return False
             remaining = max_attempts - attempt - 1
             if remaining > 0:
-                print(f"Invalid input. Please enter 'yes' or 'no'. ({remaining} attempt(s) left)")
-        print("Too many invalid responses. Considering the answer is 'no'.")
+                self._logger.info("Invalid input. Please enter 'yes' or 'no'. (%s attempt(s) left)", remaining)
+        self._logger.info("Too many invalid responses. Considering the answer is 'no'.")
         return False
 
     def conditional_start_servers(self):
@@ -408,37 +408,37 @@ class NeuroSanRunner:
         server_only = self.args["server_only"]
 
         if client_only and server_only:
-            print("Cannot use --client-only and --server-only together.")
+            self._logger.info("Cannot use --client-only and --server-only together.")
             sys.exit(1)
 
         port_conflicts, conflicting_ports = self._check_port_conflicts()
 
         # Exit early if any conflict is found
         if port_conflicts:
-            print("\n" + "=" * 50)
+            self._logger.info("\n" + "=" * 50)
             for msg in port_conflicts:
-                print(msg)
-            print("=" * 50)
+                self._logger.info(msg)
+            self._logger.info("=" * 50)
 
             if self._validate_yes_no_input("\nDo you want to kill the processes using these ports? (yes/no): "):
                 self._kill_processes_on_ports(conflicting_ports)
-                print("\nProcesses killed. Continuing with startup...\n")
+                self._logger.info("\nProcesses killed. Continuing with startup...\n")
             else:
-                print("\nExiting due to port conflicts.\n")
+                self._logger.info("\nExiting due to port conflicts.\n")
                 sys.exit(1)
 
         if not server_only:
             self.start_nsflow()
-            print("nsflow client is now running.")
+            self._logger.info("nsflow client is now running.")
 
         if not client_only:
             self.start_neuro_san()
             time.sleep(3)
-            print("Neuro-San server is now running.")
+            self._logger.info("Neuro-San server is now running.")
 
     def run(self):
         """Run the Neuro SAN server and a client."""
-        print("\nInitial Run Config:\n" + "\n".join(f"{key}: {value}" for key, value in self.args.items()) + "\n")
+        self._logger.info("\nInitial Run Config:\n" + "\n".join(f"{key}: {value}" for key, value in self.args.items()) + "\n")
 
         # Set environment variables
         self.set_environment_variables()
@@ -476,10 +476,10 @@ class NeuroSanRunner:
                     log_file = str(self.logs_dir / f"{name.lower()}.log")
                     simple_logger.attach_process_logger(proc, name, log_file)
 
-        print("\n" + "=" * 50 + "\n")
-        print("All processes now running.")
-        print("Press Ctrl+C to stop any running processes.")
-        print("\n" + "=" * 50 + "\n")
+        self._logger.info("\n" + "=" * 50 + "\n")
+        self._logger.info("All processes now running.")
+        self._logger.info("Press Ctrl+C to stop any running processes.")
+        self._logger.info("\n" + "=" * 50 + "\n")
 
         # Wait on active processes to finish
         if self.nsflow_process:
