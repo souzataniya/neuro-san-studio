@@ -494,7 +494,8 @@ class AgentNetworkDefinitionMiddleware(AgentMiddleware):
 
     def _resolve_hocon_path(self, network_hocon_file: str | None) -> str | None:
         """
-        Validate and resolve a user-supplied HOCON file reference into a concrete path string.
+        Validate and resolve a user-supplied HOCON file reference into a concrete path string
+        confined to the registries root.
 
         Resolution order:
           1. Absolute paths (POSIX-rooted, or Windows with drive/UNC anchor) are used as-is.
@@ -507,13 +508,20 @@ class AgentNetworkDefinitionMiddleware(AgentMiddleware):
              env var is empty or unset. The parse is shared with
              ``FileSystemAgentNetworkPersistor`` so loads and saves agree on file location.
 
+        Whichever tier produces the candidate, it is then confined to ``base_dir``: see
+        ``_confine_to_registries_root``. This is what keeps an absolute path, a ".." escape,
+        or a symlink from tier 1 or 2 from reading a file outside the registries directory
+        (issue #1459); tier 3 alone was not enough because tiers 1 and 2 returned their
+        candidate as-is, unchecked.
+
         Backslashes in the input are normalized to forward slashes so Windows-style paths
         work on POSIX (and vice versa).
 
-        On invalid input, sets ``self.error_message`` and returns None.
+        On invalid or out-of-root input, sets ``self.error_message`` and returns None.
 
         :param network_hocon_file: Agent network hocon file path
         :return: The resolved file reference as a forward-slash path string, or None if invalid
+                or outside the registries root
         """
         if not isinstance(network_hocon_file, str) or not network_hocon_file.strip():
             error_message: str = (
@@ -527,6 +535,14 @@ class AgentNetworkDefinitionMiddleware(AgentMiddleware):
         # Normalize backslashes so Windows-style input also works on POSIX.
         normalized: str = network_hocon_file.strip().replace("\\", "/")
         candidate: Path = Path(normalized)
+
+        # Derive the base registries directory from AGENT_MANIFEST_FILE (the dirname of the
+        # first non-empty entry), falling back to the default registries directory. The
+        # parse is shared with the persistor so loads and saves cannot drift apart again.
+        # Every tier below is confined to this directory, so it is computed once up front.
+        first_manifest: str = FileSystemAgentNetworkPersistor.get_first_manifest_path()
+        base_dir: str = os.path.dirname(first_manifest) if first_manifest else DEFAULT_REGISTRIES_DIR
+
         # Treat as absolute only if pathlib agrees AND, on Windows, the path has a drive
         # letter (e.g. "C:/...") or a UNC anchor (e.g. "//server/share/..."). On Windows
         # a bare "/foo" is "drive-rooted": Python 3.13+ reports is_absolute() == True for
@@ -534,7 +550,7 @@ class AgentNetworkDefinitionMiddleware(AgentMiddleware):
         # relative branch where the leading slash is stripped — preventing the input
         # from bypassing base_dir.
         if candidate.is_absolute() and (os.name != "nt" or candidate.drive):
-            return candidate.as_posix()
+            return self._confine_to_registries_root(network_hocon_file, candidate.as_posix(), base_dir)
 
         # Strip leading separators so a user-supplied "/foo.hocon" cannot escape base_dir.
         # POSIX absolute paths are handled above; this catches the Windows drive-rooted
@@ -544,17 +560,59 @@ class AgentNetworkDefinitionMiddleware(AgentMiddleware):
 
         # If the input resolves to an existing file relative to cwd (typically the repo
         # root when running the server from the project directory), use it as-is. This
-        # covers any repo-root-relative path, including "registries/generated/foo.hocon"
-        # or files outside the registries folder.
+        # covers a repo-root-relative path such as "registries/generated/foo.hocon";
+        # _confine_to_registries_root below still rejects it if cwd let it point outside
+        # the registries root.
         if Path(trimmed_input).is_file():
-            return trimmed_input
+            return self._confine_to_registries_root(network_hocon_file, trimmed_input, base_dir)
 
-        # Derive the base registries directory from AGENT_MANIFEST_FILE (the dirname of the
-        # first non-empty entry), falling back to the default registries directory. The
-        # parse is shared with the persistor so loads and saves cannot drift apart again.
-        first_manifest: str = FileSystemAgentNetworkPersistor.get_first_manifest_path()
-        base_dir: str = os.path.dirname(first_manifest) if first_manifest else DEFAULT_REGISTRIES_DIR
-        return (Path(base_dir) / trimmed_input).as_posix()
+        return self._confine_to_registries_root(
+            network_hocon_file, (Path(base_dir) / trimmed_input).as_posix(), base_dir
+        )
+
+    def _confine_to_registries_root(self, raw_input: str, candidate: str, base_dir: str) -> str | None:
+        """
+        Reject a resolved candidate whose real path does not lie under the registries root.
+
+        Comparing ``os.path.realpath`` results, rather than the unresolved candidate,
+        normalizes any ".." segment that the three tiers in ``_resolve_hocon_path`` pass
+        through unchanged, and also rejects a symlink whose target lies outside the root,
+        since ``realpath`` follows symlinks. This is the confinement check for issue #1459:
+        without it, an absolute path or a ".." escape from tier 1 or 2 opens whatever file
+        the server process can read.
+
+        The rejection message is deliberately generic and omits the resolved path: reporting
+        different, path-echoing messages for "outside the root", "not found" and "wrong type"
+        lets a client tell whether an arbitrary server-side path exists. The resolved path and
+        the reason are logged server-side instead, where an operator can act on them.
+
+        :param raw_input: The original, unresolved network_hocon_file value, for the server log only
+        :param candidate: The path one of the three tiers in _resolve_hocon_path resolved
+        :param base_dir: The registries root the candidate must resolve under
+        :return: candidate, unchanged, if its real path is confined to base_dir; otherwise None
+        """
+        allowed_root: str = os.path.realpath(base_dir)
+        resolved: str = os.path.realpath(candidate)
+
+        try:
+            confined: bool = os.path.commonpath([allowed_root, resolved]) == allowed_root
+        except ValueError:
+            # Raised on Windows when candidate and the registries root are on different
+            # drives: they share no common path, so the candidate cannot be confined.
+            confined = False
+
+        if not confined:
+            error_message: str = "Error: Agent network config file not found or not allowed."
+            self.logger.error(
+                "Rejected network_hocon_file %r: resolved to %r, outside registries root %r",
+                raw_input,
+                resolved,
+                allowed_root,
+            )
+            self.error_message = error_message
+            return None
+
+        return candidate
 
     async def _hocon_to_config(self, network_hocon_file: str | None) -> dict[str, Any] | None:
         """
