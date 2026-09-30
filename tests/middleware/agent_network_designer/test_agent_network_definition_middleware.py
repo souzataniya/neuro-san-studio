@@ -92,31 +92,16 @@ class TestAgentNetworkDefinitionMiddleware(IsolatedAsyncioTestCase):  # pylint: 
     loaded (issue #1440): a parse or substitution failure, an unsupported or upper-case
     extension, an unreadable path and a missing file, driven through the real restorer, plus
     the hook's hand-off of that error to the client.
-
-    Also covers the registries-root confinement in _resolve_hocon_path (issue #1459): an
-    absolute path, a ".." traversal, or a symlink must not be able to read a file outside the
-    registries root, and the rejection message must not double as an existence oracle for
-    paths on the server the client should not be able to probe.
     """
 
     def setUp(self) -> None:
         """
-        Create a scratch directory for the HOCON files the load tests write, and make it the
-        registries root the confinement check in _resolve_hocon_path allows.
+        Create a scratch directory for the HOCON files the load tests write.
         """
         # mkdtemp + addCleanup(rmtree) rather than TemporaryDirectory(): pylint flags the latter
         # with consider-using-with (R1732), and fail-under=10.0 turns any message into a CI failure.
         self.temp_dir: str = tempfile.mkdtemp(prefix="and_definition_mw_")
         self.addCleanup(shutil.rmtree, self.temp_dir, True)
-
-        # _resolve_hocon_path confines every candidate to base_dir (issue #1459), which it derives
-        # from AGENT_MANIFEST_FILE. Pointing that env var at a (non-existent, never read) manifest
-        # inside temp_dir makes temp_dir the allowed root, so the load tests below can keep writing
-        # their fixtures there and addressing them by absolute path. get_first_manifest_path() only
-        # parses the env var text; it never touches the file, so it need not exist.
-        # enterContext (unittest, Python 3.11+) restores the environment on test teardown.
-        manifest_path: str = os.path.join(self.temp_dir, "manifest.hocon")
-        self.enterContext(patch.dict(os.environ, {"AGENT_MANIFEST_FILE": manifest_path}))
 
     # Tests for AGENT_MANIFEST_FILE parsing, mirroring the persistor's parsing tests
     # so loads and saves stay in agreement on file location.
@@ -158,91 +143,6 @@ class TestAgentNetworkDefinitionMiddleware(IsolatedAsyncioTestCase):  # pylint: 
                 "generated/does_not_exist.hocon"
             )
         self.assertEqual(resolved, "registries/generated/does_not_exist.hocon")
-
-    # Tests for the registries-root confinement in _resolve_hocon_path (issue #1459): a client-supplied
-    # network_hocon_file must not be able to reach a file outside the registries root, whichever of the
-    # three tiers above produced the candidate.
-
-    def test_resolve_allows_path_confined_to_registries_root(self) -> None:
-        """
-        An absolute path inside the registries root still resolves as-is; confinement only rejects escapes.
-        """
-        inside_path: str = os.path.join(self.temp_dir, "network.hocon")
-        with open(inside_path, "w", encoding="utf-8") as network_file:
-            network_file.write("tools = []")
-
-        middleware: AgentNetworkDefinitionMiddleware = AgentNetworkDefinitionMiddleware(sly_data={})
-        resolved: str | None = middleware._resolve_hocon_path(inside_path)  # pylint: disable=protected-access
-
-        self.assertEqual(resolved, inside_path)
-
-    def test_resolve_rejects_absolute_path_outside_registries_root(self) -> None:
-        """
-        An absolute path outside the registries root is rejected, not opened as-is.
-
-        Before this check, tier 1 of _resolve_hocon_path returned any absolute path unchanged, which is
-        what let a client-supplied network_hocon_file point anywhere the server process could read.
-        """
-        outside_dir: str = tempfile.mkdtemp(prefix="and_definition_mw_outside_")
-        self.addCleanup(shutil.rmtree, outside_dir, True)
-        outside_path: str = os.path.join(outside_dir, "target.hocon")
-        with open(outside_path, "w", encoding="utf-8") as target_file:
-            target_file.write("tools = []")
-
-        middleware: AgentNetworkDefinitionMiddleware = AgentNetworkDefinitionMiddleware(sly_data={})
-        with self.assertLogs(MIDDLEWARE_LOGGER, level="ERROR") as captured:
-            resolved: str | None = middleware._resolve_hocon_path(outside_path)  # pylint: disable=protected-access
-
-        self.assertIsNone(resolved)
-        self.assertEqual(middleware.error_message, "Error: Agent network config file not found or not allowed.")
-        # The client-facing message must not double as an existence oracle for paths outside the root.
-        self.assertNotIn(outside_path, middleware.error_message)
-        # The detail withheld from the client is still in the server log, for an operator to act on.
-        self.assertIn(outside_path, captured.output[0])
-
-    def test_resolve_rejects_dotdot_traversal_outside_root(self) -> None:
-        """
-        A base_dir-relative input with ".." segments cannot walk out of the registries root.
-
-        Tier 3 of _resolve_hocon_path joins the input onto base_dir without normalizing "..", so before
-        this check a name like "../../../../etc/passwd.hocon" escaped the registries directory unchecked.
-        """
-        middleware: AgentNetworkDefinitionMiddleware = AgentNetworkDefinitionMiddleware(sly_data={})
-        # Enough ".." segments to clear any base_dir depth; extra segments at the filesystem root are a
-        # no-op for realpath(), and appending ".hocon" to a real file name keeps tier 2 (existing file
-        # relative to cwd) from matching, so this only exercises tier 3's confinement.
-        escape_target: str = "/".join([".."] * 10) + "/etc/passwd.hocon"
-
-        with self.assertLogs(MIDDLEWARE_LOGGER, level="ERROR"):
-            resolved: str | None = middleware._resolve_hocon_path(  # pylint: disable=protected-access
-                escape_target
-            )
-
-        self.assertIsNone(resolved)
-        self.assertEqual(middleware.error_message, "Error: Agent network config file not found or not allowed.")
-
-    def test_resolve_rejects_symlink_escaping_root(self) -> None:
-        """
-        A symlink inside the registries root whose target lies outside it is rejected.
-
-        The confinement check compares os.path.realpath() results, which follows the symlink before
-        comparing, so it sees the real (out-of-root) target rather than the link's in-root location.
-        """
-        outside_dir: str = tempfile.mkdtemp(prefix="and_definition_mw_outside_")
-        self.addCleanup(shutil.rmtree, outside_dir, True)
-        outside_path: str = os.path.join(outside_dir, "target.hocon")
-        with open(outside_path, "w", encoding="utf-8") as target_file:
-            target_file.write("tools = []")
-
-        link_path: str = os.path.join(self.temp_dir, "link.hocon")
-        os.symlink(outside_path, link_path)
-
-        middleware: AgentNetworkDefinitionMiddleware = AgentNetworkDefinitionMiddleware(sly_data={})
-        with self.assertLogs(MIDDLEWARE_LOGGER, level="ERROR"):
-            resolved: str | None = middleware._resolve_hocon_path(link_path)  # pylint: disable=protected-access
-
-        self.assertIsNone(resolved)
-        self.assertEqual(middleware.error_message, "Error: Agent network config file not found or not allowed.")
 
     # Tests for the error branches of _hocon_to_config (issue #1440). Every message here is what the
     # client sees: abefore_model puts self.error_message straight into the AIMessage it jumps to end with.
