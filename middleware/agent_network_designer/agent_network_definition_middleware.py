@@ -57,7 +57,10 @@ from middleware.agent_network_designer.persistence.file_system_agent_network_per
 )
 
 SUPPORTED_CONFIG_EXTENSIONS: tuple[str, ...] = (".hocon", ".json")
-CONFIG_FILE_UNAVAILABLE_MESSAGE: str = "Error: Agent network config file is unavailable or not permitted."
+CONFIG_FILE_UNAVAILABLE_MESSAGE: str = (
+    "Error: Agent network config must be a .hocon or .json file within an allowed registries directory."
+)
+CONFIG_PARSE_ERROR_MESSAGE: str = "Error: Failed to parse agent network config file. See server logs for details."
 AGENT_NETWORK_HOCON_FILE: str = "agent_network_hocon_file"
 AGENT_RESERVATIONS: str = "agent_reservations"
 RESERVATION_ID: str = "reservation_id"
@@ -495,26 +498,26 @@ class AgentNetworkDefinitionMiddleware(AgentMiddleware):
 
     def _resolve_hocon_path(self, network_hocon_file: str | None) -> str | None:
         """
-        Validate and resolve a user-supplied HOCON file reference into a concrete path string.
+        Resolve a user-supplied path and require its canonical target to be in a registry root.
 
         Resolution order:
-          1. Absolute paths (POSIX-rooted, or Windows with drive/UNC anchor) are used as-is.
-          2. Paths relative to cwd (typically the repo root) — if the input resolves to an
-             existing file under cwd, it is used as-is. This covers paths copied from the
-             repo tree such as "registries/generated/foo.hocon".
-          3. Otherwise, paths are resolved against ``base_dir`` — the directory of the
-             first non-empty entry in ``AGENT_MANIFEST_FILE`` (an ``os.pathsep``-separated
-             list of manifest files, like ``PATH``), or ``DEFAULT_REGISTRIES_DIR`` when the
-             env var is empty or unset. The parse is shared with
-             ``FileSystemAgentNetworkPersistor`` so loads and saves agree on file location.
+         1. Absolute paths are considered directly.
+         2. Existing cwd-relative paths are considered, but an out-of-root match falls
+            through to the registry-relative lookup.
+         3. Otherwise, the path is resolved against the directory of the first configured
+            manifest, or ``DEFAULT_REGISTRIES_DIR`` when no manifest is configured.
+
+        Every candidate must resolve inside the directory of at least one configured
+        manifest, or the default registries directory when no manifest is configured.
 
         Backslashes in the input are normalized to forward slashes so Windows-style paths
-        work on POSIX (and vice versa).
+        work on POSIX (and vice versa). Accepted paths are returned canonically with native
+        separators.
 
         On invalid input, sets ``self.error_message`` and returns None.
 
         :param network_hocon_file: Agent network hocon file path
-        :return: The canonical file reference using OS-native separators, or None if invalid
+        :return: The canonical in-root file reference using OS-native separators, or None if invalid
         """
         if not isinstance(network_hocon_file, str) or not network_hocon_file.strip():
             error_message: str = (
@@ -535,7 +538,10 @@ class AgentNetworkDefinitionMiddleware(AgentMiddleware):
         # relative branch where the leading slash is stripped — preventing the input
         # from bypassing base_dir.
         if candidate.is_absolute() and (os.name != "nt" or candidate.drive):
-            return self._confine_to_registries_root(candidate.as_posix())
+            confined_path: str | None = self._confine_to_registries_root(candidate.as_posix(), network_hocon_file)
+            if confined_path is None:
+                self.error_message = CONFIG_FILE_UNAVAILABLE_MESSAGE
+            return confined_path
 
         # Strip leading separators so a user-supplied "/foo.hocon" cannot escape base_dir.
         # POSIX absolute paths are handled above; this catches the Windows drive-rooted
@@ -543,50 +549,89 @@ class AgentNetworkDefinitionMiddleware(AgentMiddleware):
         # right-hand side.
         trimmed_input: str = normalized.lstrip("/")
 
-        # If the input resolves to an existing file relative to cwd (typically the repo
-        # root when running the server from the project directory), use it as-is. This
-        # covers any repo-root-relative path, including "registries/generated/foo.hocon"
-        # or files outside the registries folder.
-        if Path(trimmed_input).is_file():
-            return self._confine_to_registries_root(trimmed_input)
+        # Honor cwd-relative registry paths, but let a stray cwd file fall through to the
+        # configured registry lookup rather than shadowing a valid registry file.
+        try:
+            cwd_candidate_exists: bool = Path(trimmed_input).is_file()
+        except (OSError, ValueError, RecursionError) as path_error:
+            self.logger.warning(
+                "Could not inspect cwd-relative config candidate %r: %s", network_hocon_file, path_error
+            )
+            cwd_candidate_exists = False
+        if cwd_candidate_exists:
+            confined_path = self._confine_to_registries_root(trimmed_input, network_hocon_file, allow_fallback=True)
+            if confined_path is not None:
+                return confined_path
 
-        # Derive the base registries directory from AGENT_MANIFEST_FILE (the dirname of the
-        # first non-empty entry), falling back to the default registries directory. The
-        # parse is shared with the persistor so loads and saves cannot drift apart again.
+        # Use the first configured manifest directory for fallback lookup. The shared
+        # parser keeps load and save manifest semantics aligned.
         first_manifest: str = FileSystemAgentNetworkPersistor.get_first_manifest_path()
         base_dir: str = os.path.dirname(first_manifest) if first_manifest else DEFAULT_REGISTRIES_DIR
-        return self._confine_to_registries_root((Path(base_dir) / trimmed_input).as_posix())
+        confined_path = self._confine_to_registries_root(
+            (Path(base_dir) / trimmed_input).as_posix(), network_hocon_file
+        )
+        if confined_path is None:
+            self.error_message = CONFIG_FILE_UNAVAILABLE_MESSAGE
+        return confined_path
 
-    def _confine_to_registries_root(self, file_reference: str) -> str | None:
+    def _confine_to_registries_root(
+        self, file_reference: str, client_reference: str | None, allow_fallback: bool = False
+    ) -> str | None:
         """
         Allow only paths whose canonical target is inside a configured registry directory.
 
         :param file_reference: Candidate file path selected by _resolve_hocon_path
+        :param client_reference: Original path supplied by the client, for server diagnostics
+        :param allow_fallback: Whether an out-of-root candidate may fall through to another lookup tier
         :return: The canonical candidate path, or None after reporting a disallowed path
         """
-        manifest_paths: list[str] = [
-            path for path in os.environ.get("AGENT_MANIFEST_FILE", "").split(os.pathsep) if path
-        ]
+        manifest_paths: list[str] = FileSystemAgentNetworkPersistor.get_manifest_paths()
         allowed_roots: list[str] = [os.path.dirname(path) if os.path.dirname(path) else "." for path in manifest_paths]
         if not allowed_roots:
             allowed_roots = [DEFAULT_REGISTRIES_DIR]
 
-        canonical_file: str = os.path.realpath(file_reference)
+        try:
+            canonical_file: str = os.path.realpath(file_reference)
+            if os.path.realpath(canonical_file) != canonical_file:
+                raise ValueError("Canonical path is not stable")
+        except (OSError, ValueError, RecursionError) as path_error:
+            self.logger.error(
+                "Rejected agent network config path %r (candidate %r): %s",
+                client_reference,
+                file_reference,
+                path_error,
+            )
+            return None
+
         for allowed_root in allowed_roots:
-            canonical_root: str = os.path.realpath(allowed_root)
             try:
+                canonical_root: str = os.path.realpath(allowed_root)
+                if os.path.realpath(canonical_root) != canonical_root:
+                    continue
                 common_path: str = os.path.commonpath((canonical_file, canonical_root))
             except ValueError:
+                continue
+            except (OSError, RecursionError) as path_error:
+                self.logger.warning("Could not resolve configured registry root %s: %s", allowed_root, path_error)
                 continue
             if os.path.normcase(common_path) == os.path.normcase(canonical_root):
                 return canonical_file
 
-        self.logger.error(
-            "Rejected agent network config path %s; its canonical target is outside configured registry roots %s",
-            canonical_file,
-            allowed_roots,
-        )
-        self.error_message = CONFIG_FILE_UNAVAILABLE_MESSAGE
+        if allow_fallback:
+            self.logger.warning(
+                "Cwd-relative config candidate %r (canonical path %s) is outside configured registry roots %s; "
+                "falling back to registry-relative lookup",
+                client_reference,
+                canonical_file,
+                allowed_roots,
+            )
+        else:
+            self.logger.error(
+                "Rejected agent network config path %r (canonical candidate %s); outside configured registry roots %s",
+                client_reference,
+                canonical_file,
+                allowed_roots,
+            )
         return None
 
     async def _hocon_to_config(self, network_hocon_file: str | None) -> dict[str, Any] | None:
@@ -605,11 +650,8 @@ class AgentNetworkDefinitionMiddleware(AgentMiddleware):
         if file_reference is None:
             return None
 
-        # Screen the extension before handing the file to the restorer. The restorer reports both an
-        # unsupported extension and a parse failure as ValueError, so this check is what keeps the two
-        # apart and lets the ValueError handler below mean "could not be parsed" and nothing else. The
-        # comparison is a case-sensitive endswith() to match the restorer's own check exactly, so any
-        # file accepted here is one the restorer accepts too.
+        # Validate the canonical target's filename because that is the path the restorer
+        # receives; a symlink alias does not determine the accepted file type.
         if not file_reference.endswith(SUPPORTED_CONFIG_EXTENSIONS):
             self.logger.error(
                 "Unsupported agent network config path %s; expected one of %s",
@@ -639,9 +681,8 @@ class AgentNetworkDefinitionMiddleware(AgentMiddleware):
             # ConfigException (unresolved ${...} substitutions included) and re-raises them all as
             # ValueError, so no parser exception escapes it. The extension screen above already
             # returned, so an unsupported file cannot reach here.
-            error_message = f"Error: Failed to parse agent network config file '{file_reference}'. {value_error}"
-            self.logger.error(error_message)
-            self.error_message = error_message
+            self.logger.error("Failed to parse agent network config file %s: %s", file_reference, value_error)
+            self.error_message = CONFIG_PARSE_ERROR_MESSAGE
             return None
 
     async def _config_to_network_def(self, config: dict[str, Any], source: str) -> dict[str, Any] | None:

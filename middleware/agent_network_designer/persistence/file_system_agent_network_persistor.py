@@ -79,12 +79,20 @@ class FileSystemAgentNetworkPersistor(AgentNetworkPersistor):
 
         :return: The first non-empty manifest path, or "" when no such entry exists.
         """
+        manifest_paths: list[str] = FileSystemAgentNetworkPersistor.get_manifest_paths()
+        return manifest_paths[0] if manifest_paths else ""
+
+    @staticmethod
+    def get_manifest_paths() -> list[str]:
+        """
+        Returns every non-empty entry in AGENT_MANIFEST_FILE, preserving the server's parsing semantics.
+
+        Entries are split on os.pathsep, empty entries are skipped, and whitespace is not stripped.
+
+        :return: Configured manifest paths in environment-variable order.
+        """
         agent_manifest_file: str = os.environ.get("AGENT_MANIFEST_FILE", "")
-        parts: list[str] = agent_manifest_file.split(os.pathsep)
-        for part in parts:
-            if part:
-                return part
-        return ""
+        return [path for path in agent_manifest_file.split(os.pathsep) if path]
 
     def get_assembler(self) -> AgentNetworkAssembler:
         """

@@ -116,6 +116,24 @@ class TestFileSystemAgentNetworkPersistor(IsolatedAsyncioTestCase):  # pylint: d
         self.assertEqual(persistor.main_manifest_path, manifest)
         self.assertEqual(persistor.output_path, "real_dir")
 
+    def test_get_manifest_paths_preserves_all_non_empty_entries(self) -> None:
+        """The shared accessor returns every path in order, skipping empty entries without trimming."""
+        first_manifest: str = os.path.join("first_dir", "manifest.hocon")
+        padded_manifest: str = " " + os.path.join("second_dir", "manifest.hocon")
+        env_value: str = os.pathsep.join(["", first_manifest, "", padded_manifest])
+
+        with patch.dict(os.environ, {"AGENT_MANIFEST_FILE": env_value}):
+            manifest_paths: list[str] = FileSystemAgentNetworkPersistor.get_manifest_paths()
+
+        self.assertEqual(manifest_paths, [first_manifest, padded_manifest])
+
+    def test_get_manifest_paths_returns_empty_list_when_unset(self) -> None:
+        """The shared accessor represents an empty AGENT_MANIFEST_FILE as no configured paths."""
+        with patch.dict(os.environ, {"AGENT_MANIFEST_FILE": ""}):
+            manifest_paths: list[str] = FileSystemAgentNetworkPersistor.get_manifest_paths()
+
+        self.assertEqual(manifest_paths, [])
+
     def test_init_defaults_when_manifest_env_var_empty(self) -> None:
         """
         __init__ falls back to the default registries paths when AGENT_MANIFEST_FILE is empty.

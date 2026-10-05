@@ -34,6 +34,7 @@ from coded_tools.agent_network_editor.constants import AGENT_NETWORK_NAME
 from middleware.agent_network_designer.agent_network_definition_middleware import AGENT_NETWORK_HOCON_FILE
 from middleware.agent_network_designer.agent_network_definition_middleware import AGENT_RESERVATIONS
 from middleware.agent_network_designer.agent_network_definition_middleware import CONFIG_FILE_UNAVAILABLE_MESSAGE
+from middleware.agent_network_designer.agent_network_definition_middleware import CONFIG_PARSE_ERROR_MESSAGE
 from middleware.agent_network_designer.agent_network_definition_middleware import RESERVATION_ID
 from middleware.agent_network_designer.agent_network_definition_middleware import AgentNetworkDefinitionMiddleware
 
@@ -177,9 +178,9 @@ class TestAgentNetworkDefinitionMiddleware(IsolatedAsyncioTestCase):  # pylint: 
         Load a config file through _hocon_to_config and check the error it reports.
 
         :param name: File name to load from the scratch directory
-        :param contents: Text to write first, or None to leave the file absent
-        :param expected: Client-facing message substring and server-log substring
-        :param details: Additional substrings required in the reported message
+        :param contents: Text to write first, or None to leave it absent or use a path made as a directory
+        :param expected: Exact client-facing message and required server-log substring
+        :param details: Additional substrings required in the server log
         :return: Middleware instance that reported the error
         """
         path: str = (
@@ -191,20 +192,21 @@ class TestAgentNetworkDefinitionMiddleware(IsolatedAsyncioTestCase):  # pylint: 
             config: dict[str, Any] | None = await middleware._hocon_to_config(path)  # pylint: disable=protected-access
 
         self.assertIsNone(config)
-        self.assertIn(expected[0], middleware.error_message)
+        self.assertEqual(middleware.error_message, expected[0])
         self.assertIn(expected[1], captured.output[0])
-        self.assertIn(path, captured.output[0])
-        if expected[0] == CONFIG_FILE_UNAVAILABLE_MESSAGE:
-            self.assertNotIn(path, middleware.error_message)
+        self.assertIn(os.path.realpath(path), captured.output[0])
+        if expected[0] in (CONFIG_FILE_UNAVAILABLE_MESSAGE, CONFIG_PARSE_ERROR_MESSAGE):
+            self.assertNotIn(os.path.realpath(path), middleware.error_message)
         else:
             self.assertIn(path, middleware.error_message)
         for detail in details:
-            self.assertIn(detail, middleware.error_message)
+            self.assertIn(detail, captured.output[0])
         return middleware
 
     async def test_abefore_model_routes_config_load_error_to_end(self) -> None:
         """
-        A config load failure is returned to the client as an AIMessage and an end jump.
+        A config load failure is returned as one AIMessage and an end jump, is logged once at ERROR,
+        and sets neither the name, definition, nor metadata for a network that did not load.
         """
         path: str = self._write_config_file("malformed.hocon", '{"tools": [{"name": "a")')
         sly_data: dict[str, Any] = {AGENT_NETWORK_HOCON_FILE: path}
@@ -219,12 +221,16 @@ class TestAgentNetworkDefinitionMiddleware(IsolatedAsyncioTestCase):  # pylint: 
         self.assertEqual(len(messages), 1)
         self.assertIsInstance(messages[0], AIMessage)
         self.assertEqual(messages[0].content, middleware.error_message)
-        self.assertIn("Failed to parse agent network config file", middleware.error_message)
+        self.assertEqual(middleware.error_message, CONFIG_PARSE_ERROR_MESSAGE)
+        self.assertNotIn(os.path.realpath(path), middleware.error_message)
         self.assertNotIn(AGENT_NETWORK_NAME, sly_data)
         self.assertNotIn(AGENT_NETWORK_DEFINITION, sly_data)
         self.assertNotIn(AGENT_NETWORK_METADATA, sly_data)
         self.assertEqual(len(captured.records), 1)
-        self.assertEqual(self._messages_at_level(captured.records, "ERROR"), [middleware.error_message])
+        error_logs: list[str] = self._messages_at_level(captured.records, "ERROR")
+        self.assertEqual(len(error_logs), 1)
+        self.assertIn("Failed to parse agent network config file", error_logs[0])
+        self.assertIn(os.path.realpath(path), error_logs[0])
 
     async def test_hocon_to_config_reports_parse_failure_for_malformed_hocon(self) -> None:
         """
@@ -236,7 +242,7 @@ class TestAgentNetworkDefinitionMiddleware(IsolatedAsyncioTestCase):  # pylint: 
         await self._assert_load_error(
             "malformed.hocon",
             '{"tools": [{"name": "a")',
-            ("Failed to parse agent network config file", "Failed to parse agent network config file"),
+            (CONFIG_PARSE_ERROR_MESSAGE, "Failed to parse agent network config file"),
             ("ParseSyntaxException",),
         )
 
@@ -250,7 +256,7 @@ class TestAgentNetworkDefinitionMiddleware(IsolatedAsyncioTestCase):  # pylint: 
         await self._assert_load_error(
             "missing_sub.hocon",
             "tools = [${nope}]",
-            ("Failed to parse agent network config file", "Failed to parse agent network config file"),
+            (CONFIG_PARSE_ERROR_MESSAGE, "Failed to parse agent network config file"),
             ("ConfigSubstitutionException", "nope"),
         )
 
@@ -262,7 +268,7 @@ class TestAgentNetworkDefinitionMiddleware(IsolatedAsyncioTestCase):  # pylint: 
         await self._assert_load_error(
             "bad.json",
             '{"tools": [}',
-            ("Failed to parse agent network config file", "Failed to parse agent network config file"),
+            (CONFIG_PARSE_ERROR_MESSAGE, "Failed to parse agent network config file"),
             ("JSONDecodeError",),
         )
 
@@ -330,7 +336,7 @@ class TestAgentNetworkDefinitionMiddleware(IsolatedAsyncioTestCase):  # pylint: 
         self.assertIsNone(resolved)
         self.assertEqual(middleware.error_message, CONFIG_FILE_UNAVAILABLE_MESSAGE)
         self.assertIn("Rejected agent network config path", captured.output[0])
-        self.assertIn(outside_path, captured.output[0])
+        self.assertIn(os.path.realpath(outside_path), captured.output[0])
         self.assertNotIn(outside_path, middleware.error_message)
 
     def test_resolve_rejects_parent_traversal_outside_registry_root(self) -> None:
@@ -368,6 +374,145 @@ class TestAgentNetworkDefinitionMiddleware(IsolatedAsyncioTestCase):  # pylint: 
         self.assertEqual(middleware.error_message, CONFIG_FILE_UNAVAILABLE_MESSAGE)
         self.assertIn("Rejected agent network config path", captured.output[0])
         self.assertIn(os.path.realpath(outside_path), captured.output[0])
+
+    def test_resolve_rejects_symlink_loop_before_outside_target(self) -> None:
+        """A symlink loop cannot leave unresolved components that authorize an outside target."""
+        outside_directory: str = tempfile.mkdtemp(prefix="and_definition_outside_")
+        self.addCleanup(shutil.rmtree, outside_directory, True)
+        outside_path: str = os.path.join(outside_directory, "network.hocon")
+        with open(outside_path, "w", encoding="utf-8") as config_file:
+            config_file.write("tools = []")
+        loop_path: str = os.path.join(self.temp_dir, "loopdirA")
+        outside_link: str = os.path.join(self.temp_dir, "link_out.hocon")
+        try:
+            os.symlink(loop_path, loop_path)
+            os.symlink(outside_path, outside_link)
+        except OSError as symlink_error:
+            self.skipTest(f"Symlink creation is unavailable: {symlink_error}")
+        candidate: str = os.path.join(loop_path, "..", "link_out.hocon")
+        middleware: AgentNetworkDefinitionMiddleware = AgentNetworkDefinitionMiddleware(sly_data={})
+
+        with self.assertLogs(MIDDLEWARE_LOGGER, level="ERROR") as captured:
+            resolved: str | None = middleware._resolve_hocon_path(candidate)  # pylint: disable=protected-access
+
+        self.assertIsNone(resolved)
+        self.assertEqual(middleware.error_message, CONFIG_FILE_UNAVAILABLE_MESSAGE)
+        self.assertIn("Rejected agent network config path", captured.output[0])
+
+    def test_resolve_returns_cwd_relative_path_when_it_is_inside_root(self) -> None:
+        """An existing cwd-relative path remains usable when its canonical target is in a registry root."""
+        file_path: str = self._write_config_file("cwd_inside.hocon", '{"tools": []}')
+        cwd_relative_path: str = os.path.relpath(file_path, os.getcwd())
+        middleware: AgentNetworkDefinitionMiddleware = AgentNetworkDefinitionMiddleware(sly_data={})
+
+        resolved: str | None = middleware._resolve_hocon_path(cwd_relative_path)  # pylint: disable=protected-access
+
+        self.assertEqual(resolved, os.path.realpath(file_path))
+
+    def test_resolve_treats_cwd_is_file_oserror_as_no_match(self) -> None:
+        """An OSError inspecting the cwd candidate does not escape and lookup continues under registries."""
+        middleware: AgentNetworkDefinitionMiddleware = AgentNetworkDefinitionMiddleware(sly_data={})
+        registry_path: str = os.path.join(self.temp_dir, "not_present.hocon")
+
+        with (
+            patch(
+                "middleware.agent_network_designer.agent_network_definition_middleware.Path.is_file",
+                side_effect=PermissionError("denied"),
+            ),
+            self.assertLogs(MIDDLEWARE_LOGGER, level="WARNING") as captured,
+        ):
+            resolved: str | None = middleware._resolve_hocon_path("not_present.hocon")  # pylint: disable=protected-access
+
+        self.assertEqual(resolved, os.path.realpath(registry_path))
+        self.assertIn("Could not inspect cwd-relative config candidate", captured.output[0])
+
+    async def test_load_falls_through_from_outside_cwd_match_to_registry_path(self) -> None:
+        """An out-of-root cwd file does not shadow a valid registry load or leave an error behind."""
+        descriptor: int
+        cwd_path: str
+        descriptor, cwd_path = tempfile.mkstemp(prefix="and_definition_cwd_", suffix=".hocon", dir=os.getcwd())
+        os.close(descriptor)
+        self.addCleanup(os.remove, cwd_path)
+        file_name: str = os.path.basename(cwd_path)
+        registry_path: str = os.path.join(self.temp_dir, file_name)
+        with open(registry_path, "w", encoding="utf-8") as config_file:
+            config_file.write('{"tools": []}')
+        middleware: AgentNetworkDefinitionMiddleware = AgentNetworkDefinitionMiddleware(sly_data={})
+
+        with self.assertLogs(MIDDLEWARE_LOGGER, level="WARNING") as captured:
+            config: dict[str, Any] | None = await middleware._hocon_to_config(file_name)  # pylint: disable=protected-access
+
+        self.assertEqual(config, {"tools": []})
+        self.assertEqual(middleware.error_message, "")
+        self.assertIn("falling back", captured.output[0])
+
+    async def test_load_rejection_sets_exact_generic_error(self) -> None:
+        """A terminal confinement rejection returns the single generic client-facing message."""
+        outside_directory: str = tempfile.mkdtemp(prefix="and_definition_terminal_")
+        self.addCleanup(shutil.rmtree, outside_directory, True)
+        outside_path: str = os.path.join(outside_directory, "outside.hocon")
+        middleware: AgentNetworkDefinitionMiddleware = AgentNetworkDefinitionMiddleware(sly_data={})
+
+        with self.assertLogs(MIDDLEWARE_LOGGER, level="ERROR"):
+            config: dict[str, Any] | None = await middleware._hocon_to_config(  # pylint: disable=protected-access
+                outside_path
+            )
+
+        self.assertIsNone(config)
+        self.assertEqual(middleware.error_message, CONFIG_FILE_UNAVAILABLE_MESSAGE)
+
+    def test_resolve_rejects_sibling_directory_with_root_prefix(self) -> None:
+        """A sibling named registries_backup is not inside a root named registries."""
+        registries_root: str = os.path.join(self.temp_dir, "registries")
+        sibling_root: str = os.path.join(self.temp_dir, "registries_backup")
+        os.mkdir(registries_root)
+        os.mkdir(sibling_root)
+        manifest_path: str = os.path.join(registries_root, "manifest.hocon")
+        sibling_file: str = os.path.join(sibling_root, "network.hocon")
+        with open(sibling_file, "w", encoding="utf-8") as config_file:
+            config_file.write("tools = []")
+        middleware: AgentNetworkDefinitionMiddleware = AgentNetworkDefinitionMiddleware(sly_data={})
+
+        with (
+            patch.dict(os.environ, {"AGENT_MANIFEST_FILE": manifest_path}),
+            self.assertLogs(MIDDLEWARE_LOGGER, level="ERROR") as captured,
+        ):
+            resolved: str | None = middleware._resolve_hocon_path(sibling_file)  # pylint: disable=protected-access
+
+        self.assertIsNone(resolved)
+        self.assertEqual(middleware.error_message, CONFIG_FILE_UNAVAILABLE_MESSAGE)
+        self.assertIn("outside configured registry roots", captured.output[0])
+
+    async def test_abefore_model_handles_nul_byte_path_without_raising(self) -> None:
+        """NUL and lone-surrogate input return the generic error instead of escaping the hook."""
+        for invalid_path in ("generated/x\x00.hocon", "generated/\ud800.hocon"):
+            with self.subTest(path=repr(invalid_path)):
+                middleware: AgentNetworkDefinitionMiddleware = AgentNetworkDefinitionMiddleware(
+                    sly_data={AGENT_NETWORK_HOCON_FILE: invalid_path}
+                )
+
+                result: dict[str, Any] | None = await middleware.abefore_model({}, None)
+
+                self.assertIsInstance(result, dict)
+                self.assertEqual(result.get("jump_to"), "end")
+                self.assertEqual(result.get("messages")[0].content, CONFIG_FILE_UNAVAILABLE_MESSAGE)
+
+    async def test_parse_failure_does_not_return_path_or_exception_details_to_client(self) -> None:
+        """Parser errors and every known path spelling stay in logs, not in the client response."""
+        file_path: str = self._write_config_file("bad_relative.hocon", '{"tools": [{"name": "a")')
+        client_path: str = os.path.relpath(file_path, os.getcwd())
+        middleware: AgentNetworkDefinitionMiddleware = AgentNetworkDefinitionMiddleware(sly_data={})
+
+        with self.assertLogs(MIDDLEWARE_LOGGER, level="ERROR") as captured:
+            config: dict[str, Any] | None = await middleware._hocon_to_config(client_path)  # pylint: disable=protected-access
+
+        self.assertIsNone(config)
+        self.assertEqual(middleware.error_message, CONFIG_PARSE_ERROR_MESSAGE)
+        self.assertNotIn(client_path, middleware.error_message)
+        self.assertNotIn(os.path.abspath(file_path), middleware.error_message)
+        self.assertNotIn(os.path.realpath(file_path), middleware.error_message)
+        self.assertIn(os.path.realpath(file_path), captured.output[0])
+        self.assertIn("ParseSyntaxException", captured.output[0])
 
     async def test_hocon_to_config_loads_absolute_path_inside_registry_root(self) -> None:
         """An absolute path remains supported when its canonical target is inside a registry root."""
