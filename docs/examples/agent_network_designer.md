@@ -333,6 +333,9 @@ specifically given the hocon file name in the user prompt
 [`AgentNetworkDefinitionMiddleware`](../../middleware/agent_network_designer/agent_network_definition_middleware.py)
 - Runs before the model is called and resolves the `agent_network_definition` from sly data, from the file
 named in `agent_network_hocon_file`, or from the reservation named in `agent_reservations`
+- Confines file-based loads to the directory of at least one configured manifest entry (each non-empty entry is an
+allowed root), or `registries/` when `AGENT_MANIFEST_FILE` is unset; canonical paths, traversal, and symlinks must
+stay within an allowed root
 - When the network comes from a file or a reservation, its top-level `metadata` block is returned under
 `agent_network_metadata` (without the `reservation`/`stored_at` keys of a temporary network), so the client
 holds the loaded network's block and sends it back on the next save like any other. The loaded block replaces
